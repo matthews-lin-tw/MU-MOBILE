@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>MU 戰情室 (Mobile)</title>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+    
+    <style>
+        /* --- 現代柔和深色系 (Modern Soft Dark) --- */
+        body { background-color: #1a1b1e; color: #e9ecef; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 10px; }
+        h2 { text-align: center; margin: 10px 0; color: #74c0fc; font-weight: 800; letter-spacing: 1px; }
+        
+        /* 狀態列 */
+        .status-bar { display: flex; justify-content: space-around; background: #2c2e33; padding: 10px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #373a40; }
+        .stat-item { text-align: center; }
+        .stat-val { font-size: 1.2rem; font-weight: bold; display: block; }
+        .stat-label { font-size: 0.7rem; color: #adb5bd; }
+        .c-green { color: #51cf66; } .c-red { color: #ff6b6b; } .c-blue { color: #74c0fc; }
+
+        /* 卡片網格 (手機版自動變 2欄) */
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+        
+        /* 單張電腦卡片 */
+        .card { background-color: #25262b; border-radius: 6px; overflow: hidden; border: 1px solid #373a40; box-shadow: 0 2px 5px rgba(0,0,0,0.3); transition: transform 0.2s; }
+        .card-header { background-color: #2c2e33; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; font-weight: bold; border-bottom: 1px solid #373a40; }
+        .card-body { padding: 8px; }
+        
+        /* 斷線狀態 */
+        .offline { border-color: #ff6b6b; }
+        .offline .card-header { background-color: #4a1e1e; color: #ff6b6b; }
+
+        /* 視窗列表 */
+        .win-row { display: flex; align-items: center; margin-bottom: 4px; font-size: 0.8rem; color: #adb5bd; }
+        .dot { height: 8px; width: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; background-color: #2f3136; }
+        .dot.ok { background-color: #51cf66; box-shadow: 0 0 5px #51cf66; }
+        .dot.err { background-color: #ff6b6b; }
+        .pid-id { color: #4dabf7; font-family: monospace; margin-right: 5px; font-weight: bold; }
+
+        /* 硬體條 */
+        .hw-row { display: flex; align-items: center; margin-top: 6px; font-size: 0.7rem; color: #666; }
+        .hw-label { width: 35px; }
+        .progress-bg { flex-grow: 1; height: 4px; background: #333; border-radius: 2px; overflow: hidden; margin-right: 5px; }
+        .progress-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
+        .hw-val { width: 30px; text-align: right; color: #888; }
+        
+        /* 載入中 */
+        #loading { text-align: center; margin-top: 50px; color: #666; }
+    </style>
+</head>
+<body>
+
+    <h2>MU MOBILE</h2>
+
+    <div class="status-bar">
+        <div class="stat-item">
+            <span class="stat-val c-blue" id="total-count">-</span>
+            <span class="stat-label">電腦</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-val c-green" id="win-count">-</span>
+            <span class="stat-label">視窗</span>
+        </div>
+        <div class="stat-item">
+            <span class="stat-val" id="last-sync" style="color: #adb5bd;">--:--</span>
+            <span class="stat-label">更新</span>
+        </div>
+    </div>
+
+    <div id="loading">正在連線至 Firebase...</div>
+    <div class="grid" id="pc-grid"></div>
+
+    <script>
+        // ============================================
+        // ⚠️ 請替換成您在 Firebase 控制台拿到的設定 ⚠️
+        // ============================================
+        const firebaseConfig = {
+            apiKey: "AIzaSyA2xc09UhLfZSRWtGdDOchF9ntcPgEBbpM",
+            authDomain: "mumonitor-708b3.firebaseapp.com",
+            databaseURL: "https://mumonitor-708b3-default-rtdb.firebaseio.com",
+            projectId: "mumonitor-708b3",
+            storageBucket: "mumonitor-708b3.firebasestorage.app",
+            messagingSenderId: "925162913380",
+            appId: "1:925162913380:web:cc3c06b15f0f83faf5a971"
+        };
+        // ============================================
+
+        // 初始化 Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+        const OFFLINE_TIMEOUT = 20; // 20秒沒訊號算斷線
+
+        const grid = document.getElementById('pc-grid');
+        const loading = document.getElementById('loading');
+
+        // 監聽資料變化 (即時更新)
+        db.ref('/computers').on('value', (snapshot) => {
+            loading.style.display = 'none';
+            const data = snapshot.val();
+            if (!data) return;
+
+            renderDashboard(data);
+        });
+
+        function renderDashboard(data) {
+            grid.innerHTML = ''; // 清空重繪
+            
+            let totalPC = 0;
+            let totalWin = 0;
+            
+            // 自然排序 (PC-1, PC-2, PC-10)
+            const sortedKeys = Object.keys(data).sort((a, b) => 
+                a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+            );
+
+            sortedKeys.forEach(pcName => {
+                totalPC++;
+                const pc = data[pcName];
+                const now = Date.now() / 1000;
+                const lastSeen = pc.last_seen || 0;
+                const isOffline = (now - lastSeen) > OFFLINE_TIMEOUT;
+                
+                // 硬體資料
+                const hw = pc.hardware || {cpu:0, ram:0, temp:0};
+                
+                // 建立卡片 HTML
+                const card = document.createElement('div');
+                card.className = `card ${isOffline ? 'offline' : ''}`;
+                
+                const headerText = isOffline ? `失聯 ${Math.floor(now - lastSeen)}s` : '連線中';
+                
+                let winHtml = '';
+                const pids = pc.windows ? Object.keys(pc.windows).sort() : [];
+                
+                // 生成 8 個視窗燈號
+                for(let i=0; i<8; i++) {
+                    let dotClass = 'dot';
+                    let text = '--';
+                    let textColor = '#5c5f66'; // Dim
+
+                    if (!isOffline && i < pids.length) {
+                        const win = pc.windows[pids[i]];
+                        let ch = win.channel || '未知';
+                        ch = ch.replace('第 ', '').replace(' ', '');
+                        if(ch.includes('活動')) ch = '【活動】';
+
+                        text = ch;
+                        if (win.status === 'CONNECTED') {
+                            dotClass += ' ok';
+                            textColor = '#e9ecef'; // Main
+                            if(ch.includes('活動')) textColor = '#fcc419'; // Warn
+                            totalWin++;
+                        } else {
+                            dotClass += ' err';
+                            textColor = '#ff6b6b'; // Err
+                        }
+                    } else if (isOffline) {
+                        // 斷線時維持暗色
+                    }
+
+                    winHtml += `
+                        <div class="win-row">
+                            <span class="${dotClass}"></span>
+                            <span class="pid-id">#${i+1}</span>
+                            <span style="color: ${textColor}">${text}</span>
+                        </div>
+                    `;
+                }
+
+                // 硬體條 HTML
+                const cpuColor = hw.cpu > 90 ? '#fcc419' : '#74c0fc';
+                const ramColor = hw.ram > 90 ? '#ff6b6b' : '#51cf66';
+                
+                // 溫度邏輯
+                let tempHtml = '';
+                if(hw.temp > 0) {
+                    const tempColor = hw.temp > 80 ? '#ff6b6b' : '#fcc419';
+                    tempHtml = `
+                    <div class="hw-row">
+                        <span class="hw-label">TEMP</span>
+                        <div class="progress-bg"><div class="progress-fill" style="width: ${Math.min(hw.temp, 100)}%; background: ${tempColor}"></div></div>
+                        <span class="hw-val">${hw.temp}°</span>
+                    </div>`;
+                }
+
+                card.innerHTML = `
+                    <div class="card-header">
+                        <span>${pcName}</span>
+                        <span style="font-weight:normal; font-size:0.8rem; opacity:0.8">${headerText}</span>
+                    </div>
+                    <div class="card-body">
+                        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:5px;">
+                            ${winHtml}
+                        </div>
+                        <div style="margin-top:10px; border-top:1px solid #333; padding-top:5px;">
+                            <div class="hw-row">
+                                <span class="hw-label">CPU</span>
+                                <div class="progress-bg"><div class="progress-fill" style="width: ${hw.cpu}%; background: ${cpuColor}"></div></div>
+                                <span class="hw-val">${parseInt(hw.cpu)}%</span>
+                            </div>
+                            <div class="hw-row">
+                                <span class="hw-label">RAM</span>
+                                <div class="progress-bg"><div class="progress-fill" style="width: ${hw.ram}%; background: ${ramColor}"></div></div>
+                                <span class="hw-val">${parseInt(hw.ram)}%</span>
+                            </div>
+                            ${tempHtml}
+                        </div>
+                    </div>
+                `;
+                grid.appendChild(card);
+            });
+
+            // 更新頂部統計
+            document.getElementById('total-count').innerText = totalPC;
+            document.getElementById('win-count').innerText = totalWin;
+            
+            const d = new Date();
+            document.getElementById('last-sync').innerText = 
+                `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
+        }
+    </script>
+</body>
+</html>
